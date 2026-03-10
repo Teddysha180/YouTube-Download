@@ -4,6 +4,7 @@ YouTube Downloader Telegram Bot - Local Test Version for Windows
 
 import os
 import re
+import tempfile
 import urllib.parse
 import asyncio
 import logging
@@ -72,6 +73,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Optional: cookies for yt-dlp (set YTDLP_COOKIES env var with Netscape cookies content)
+COOKIE_FILE_PATH = ""
+_cookies_env = os.getenv("YTDLP_COOKIES", "").strip()
+if _cookies_env:
+    try:
+        fd, cookie_path = tempfile.mkstemp(prefix="ytdlp_", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(_cookies_env)
+        COOKIE_FILE_PATH = cookie_path
+    except Exception as e:
+        logger.warning(f"Failed to write YTDLP_COOKIES to file: {e}")
+
 # ==================== DOWNLOAD HANDLER ====================
 class YouTubeDownloader:
     """Handles YouTube downloads"""
@@ -81,13 +94,10 @@ class YouTubeDownloader:
     
     async def get_video_info(self, url: str) -> Optional[Dict]:
         """Extract video information"""
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": True,
-            "noplaylist": True,
-            "retries": 3,
-        }
+        ydl_opts = self._base_ydl_opts()
+        ydl_opts.update({
+            "skip_download": True,
+        })
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -114,14 +124,11 @@ class YouTubeDownloader:
         quality_config = QUALITY_OPTIONS[quality]
         output_template = str(DOWNLOAD_DIR / f"%(title)s_{user_id}.%(ext)s")
         
-        ydl_opts = {
+        ydl_opts = self._base_ydl_opts()
+        ydl_opts.update({
             "outtmpl": output_template,
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "retries": 3,
             **quality_config
-        }
+        })
         
         try:
             async with self.semaphore:
@@ -143,6 +150,26 @@ class YouTubeDownloader:
         except Exception as e:
             logger.error(f"Download error: {e}")
             return None
+
+    def _base_ydl_opts(self) -> Dict:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "retries": 3,
+            "socket_timeout": 20,
+            "geo_bypass": True,
+            "nocheckcertificate": True,
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/121.0.0.0 Safari/537.36"
+            ),
+            "referer": "https://www.youtube.com/",
+        }
+        if COOKIE_FILE_PATH:
+            opts["cookiefile"] = COOKIE_FILE_PATH
+        return opts
 
 # Initialize downloader
 downloader = YouTubeDownloader()
