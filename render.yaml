@@ -3,6 +3,7 @@ services:
   - type: web
     name: youtube-downloader-bot
     runtime: python
+    pythonVersion: 3.11.0
     repo: https://github.com/Teddysha180/YouTube-Download
     plan: free
     region: oregon
