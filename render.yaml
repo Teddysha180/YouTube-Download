@@ -1,9 +1,9 @@
 # render.yaml
 services:
-  - type: worker
+  - type: web
     name: youtube-downloader-bot
     runtime: python
-    repo: https://github.com/YOUR_USERNAME/youtube-downloader-bot
+    repo: https://github.com/Teddysha180/YouTube-Download
     plan: free
     region: oregon
     buildCommand: pip install -r requirements.txt
@@ -11,5 +11,7 @@ services:
     envVars:
       - key: BOT_TOKEN
         sync: false  # You'll set this manually
+      - key: WEBHOOK_PATH
+        value: telegram
       - key: ALLOWED_USERS
         value: ""  # Comma-separated user IDs, leave empty for public

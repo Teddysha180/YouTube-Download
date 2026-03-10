@@ -25,6 +25,16 @@ import yt_dlp
 # Bot token should come from environment to avoid hardcoding secrets
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
+# Webhook settings (for Render web service)
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "telegram").strip().lstrip("/")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+if not WEBHOOK_URL and RENDER_EXTERNAL_URL:
+    WEBHOOK_URL = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{WEBHOOK_PATH}"
+
+# Render provides PORT for web services
+PORT = int(os.getenv("PORT", "8080"))
+
 # Download folder (local folder)
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -310,7 +320,20 @@ def main():
     app.add_error_handler(error_handler)
     
     # Start bot
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    if WEBHOOK_URL:
+        # Ensure webhook_url matches the configured path
+        if WEBHOOK_PATH and not WEBHOOK_URL.rstrip("/").endswith(f"/{WEBHOOK_PATH}"):
+            WEBHOOK_URL = f"{WEBHOOK_URL.rstrip('/')}/{WEBHOOK_PATH}"
+
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=WEBHOOK_PATH,
+            webhook_url=WEBHOOK_URL,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
