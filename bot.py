@@ -85,6 +85,9 @@ if _cookies_env:
     except Exception as e:
         logger.warning(f"Failed to write YTDLP_COOKIES to file: {e}")
 
+# Show raw yt-dlp errors to user (debug)
+SHOW_ERRORS = os.getenv("SHOW_ERRORS", "").strip().lower() in {"1", "true", "yes"}
+
 # ==================== DOWNLOAD HANDLER ====================
 class YouTubeDownloader:
     """Handles YouTube downloads"""
@@ -94,26 +97,35 @@ class YouTubeDownloader:
     
     async def get_video_info(self, url: str) -> Optional[Dict]:
         """Extract video information"""
-        ydl_opts = self._base_ydl_opts()
-        ydl_opts.update({
+        base = self._base_ydl_opts()
+        base.update({
             "skip_download": True,
         })
-        
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.to_thread(ydl.extract_info, url, download=False)
-                
-                return {
-                    "title": info.get("title", "Unknown"),
-                    "duration": info.get("duration", 0),
-                    "uploader": info.get("uploader", "Unknown"),
-                    "views": info.get("view_count", 0),
-                    "thumbnail": info.get("thumbnail", ""),
-                    "url": url
+
+        # First attempt: default extractor behavior
+        info = await self._try_extract(url, base)
+        if not info:
+            # Second attempt: force alternate YouTube clients
+            alt = dict(base)
+            alt["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["android", "web", "ios"],
+                    "skip": ["dash", "hls"],
                 }
-        except Exception as e:
-            logger.error(f"Error getting video info: {e}")
+            }
+            info = await self._try_extract(url, alt)
+
+        if not info:
             return None
+
+        return {
+            "title": info.get("title", "Unknown"),
+            "duration": info.get("duration", 0),
+            "uploader": info.get("uploader", "Unknown"),
+            "views": info.get("view_count", 0),
+            "thumbnail": info.get("thumbnail", ""),
+            "url": url
+        }
     
     async def download_video(self, url: str, quality: str, user_id: int) -> Optional[Path]:
         """Download video"""
@@ -160,6 +172,7 @@ class YouTubeDownloader:
             "socket_timeout": 20,
             "geo_bypass": True,
             "nocheckcertificate": True,
+            "force_ipv4": True,
             "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -170,6 +183,14 @@ class YouTubeDownloader:
         if COOKIE_FILE_PATH:
             opts["cookiefile"] = COOKIE_FILE_PATH
         return opts
+
+    async def _try_extract(self, url: str, ydl_opts: Dict) -> Optional[Dict]:
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return await asyncio.to_thread(ydl.extract_info, url, download=False)
+        except Exception as e:
+            logger.error(f"Error getting video info: {e}")
+            return None
 
 # Initialize downloader
 downloader = YouTubeDownloader()
@@ -211,9 +232,14 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     info = await downloader.get_video_info(url)
     
     if not info:
-        await processing_msg.edit_text(
-            "❌ Couldn't fetch video info. The URL may be invalid, restricted, or blocked."
-        )
+        if SHOW_ERRORS:
+            await processing_msg.edit_text(
+                "❌ Couldn't fetch video info. Check logs for details."
+            )
+        else:
+            await processing_msg.edit_text(
+                "❌ Couldn't fetch video info. The URL may be invalid, restricted, or blocked."
+            )
         return
     
     # Format duration
