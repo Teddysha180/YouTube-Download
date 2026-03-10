@@ -3,6 +3,8 @@ YouTube Downloader Telegram Bot - Local Test Version for Windows
 """
 
 import os
+import re
+import urllib.parse
 import asyncio
 import logging
 from pathlib import Path
@@ -38,6 +40,13 @@ PORT = int(os.getenv("PORT", "8080"))
 # Download folder (local folder)
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
+
+# Optional: restrict bot usage to specific Telegram user IDs
+ALLOWED_USERS = {
+    int(x.strip())
+    for x in os.getenv("ALLOWED_USERS", "").split(",")
+    if x.strip().isdigit()
+}
 
 # Quality options
 QUALITY_OPTIONS = {
@@ -76,6 +85,8 @@ class YouTubeDownloader:
             "quiet": True,
             "no_warnings": True,
             "extract_flat": True,
+            "noplaylist": True,
+            "retries": 3,
         }
         
         try:
@@ -107,6 +118,8 @@ class YouTubeDownloader:
             "outtmpl": output_template,
             "quiet": True,
             "no_warnings": True,
+            "noplaylist": True,
+            "retries": 3,
             **quality_config
         }
         
@@ -153,9 +166,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle YouTube URLs"""
     url = update.message.text.strip()
-    
-    # URL validation
-    if not any(domain in url for domain in ['youtube.com/watch', 'youtu.be/', 'm.youtube.com']):
+
+    if ALLOWED_USERS and update.effective_user and update.effective_user.id not in ALLOWED_USERS:
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+
+    # URL validation (supports watch, shorts, live, music, youtu.be)
+    if not is_valid_youtube_url(url):
         await update.message.reply_text("❌ Please send a valid YouTube URL")
         return
     
@@ -167,7 +184,9 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     info = await downloader.get_video_info(url)
     
     if not info:
-        await processing_msg.edit_text("❌ Couldn't fetch video info. Make sure the URL is correct.")
+        await processing_msg.edit_text(
+            "❌ Couldn't fetch video info. The URL may be invalid, restricted, or blocked."
+        )
         return
     
     # Format duration
@@ -290,6 +309,41 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except:
         pass
+
+# ==================== URL HELPERS ====================
+YOUTUBE_HOSTS = {
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+}
+
+def is_valid_youtube_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+
+    if parsed.scheme not in {"http", "https"}:
+        return False
+
+    host = (parsed.netloc or "").lower()
+    if host not in YOUTUBE_HOSTS:
+        return False
+
+    path = parsed.path or ""
+    if host == "youtu.be":
+        return bool(path.strip("/"))
+
+    # Accept watch, shorts, live, or embed
+    if path.startswith("/watch"):
+        qs = urllib.parse.parse_qs(parsed.query or "")
+        return "v" in qs and qs["v"]
+    if re.match(r"^/(shorts|live|embed)/[^/]+", path):
+        return True
+
+    return False
 
 # ==================== MAIN ====================
 def main():
