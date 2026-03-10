@@ -88,6 +88,9 @@ if _cookies_env:
 # Show raw yt-dlp errors to user (debug)
 SHOW_ERRORS = os.getenv("SHOW_ERRORS", "").strip().lower() in {"1", "true", "yes"}
 
+# Optional: proxy for yt-dlp (e.g. http://user:pass@host:port or socks5://host:port)
+YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
+
 # ==================== DOWNLOAD HANDLER ====================
 class YouTubeDownloader:
     """Handles YouTube downloads"""
@@ -182,6 +185,8 @@ class YouTubeDownloader:
         }
         if COOKIE_FILE_PATH:
             opts["cookiefile"] = COOKIE_FILE_PATH
+        if YTDLP_PROXY:
+            opts["proxy"] = YTDLP_PROXY
         return opts
 
     async def _try_extract(self, url: str, ydl_opts: Dict) -> Optional[Dict]:
@@ -231,17 +236,29 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     info = await downloader.get_video_info(url)
     
+    # If info fetch fails, still allow user to try downloading directly
     if not info:
-        if SHOW_ERRORS:
-            await processing_msg.edit_text(
-                "❌ Couldn't fetch video info. Check logs for details."
-            )
-        else:
-            await processing_msg.edit_text(
-                "❌ Couldn't fetch video info. The URL may be invalid, restricted, or blocked."
-            )
+        await processing_msg.edit_text(
+            "⚠️ Couldn't fetch video info. You can still try downloading directly."
+        )
+        keyboard = [
+            [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl_audio_{url}")],
+            [
+                InlineKeyboardButton("360p", callback_data=f"dl_360p_{url}"),
+                InlineKeyboardButton("480p", callback_data=f"dl_480p_{url}"),
+            ],
+            [
+                InlineKeyboardButton("720p", callback_data=f"dl_720p_{url}"),
+                InlineKeyboardButton("1080p", callback_data=f"dl_1080p_{url}"),
+            ],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+        ]
+        await update.message.reply_text(
+            "Choose quality to try:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
-    
+
     # Format duration
     duration = str(timedelta(seconds=info['duration']))
     
