@@ -320,16 +320,17 @@ def main():
     app.add_error_handler(error_handler)
     
     # Start bot
-    if WEBHOOK_URL:
+    webhook_url = WEBHOOK_URL
+    if webhook_url:
         # Ensure webhook_url matches the configured path
-        if WEBHOOK_PATH and not WEBHOOK_URL.rstrip("/").endswith(f"/{WEBHOOK_PATH}"):
-            WEBHOOK_URL = f"{WEBHOOK_URL.rstrip('/')}/{WEBHOOK_PATH}"
+        if WEBHOOK_PATH and not webhook_url.rstrip("/").endswith(f"/{WEBHOOK_PATH}"):
+            webhook_url = f"{webhook_url.rstrip('/')}/{WEBHOOK_PATH}"
 
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
             url_path=WEBHOOK_PATH,
-            webhook_url=WEBHOOK_URL,
+            webhook_url=webhook_url,
             allowed_updates=Update.ALL_TYPES,
         )
     else:
