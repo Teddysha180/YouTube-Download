@@ -50,7 +50,7 @@ ALLOWED_USERS = {
     if x.strip().isdigit()
 }
 
-# Quality options
+# Quality options (keep it simple: audio or video)
 QUALITY_OPTIONS = {
     "audio": {
         "format": "bestaudio/best",
@@ -61,10 +61,7 @@ QUALITY_OPTIONS = {
         }],
         "ext": "mp3"
     },
-    "360p": {"format": "best[height<=360][ext=mp4]", "ext": "mp4"},
-    "480p": {"format": "best[height<=480][ext=mp4]", "ext": "mp4"},
-    "720p": {"format": "best[height<=720][ext=mp4]", "ext": "mp4"},
-    "1080p": {"format": "best[height<=1080][ext=mp4]", "ext": "mp4"},
+    "video": {"format": "best[ext=mp4]/best", "ext": "mp4"},
 }
 
 # ==================== LOGGING ====================
@@ -216,12 +213,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = (
         "🎥 *TikTok Downloader Bot*\n\n"
         "Send me a TikTok link and I'll download it!\n\n"
-        "Available qualities:\n"
+        "Options:\n"
         "• Audio only (MP3)\n"
-        "• 360p\n"
-        "• 480p\n"
-        "• 720p\n"
-        "• 1080p\n\n"
+        "• Video (MP4)\n\n"
         "⚠️ *Testing locally on Windows*"
     )
     await update.message.reply_text(welcome, parse_mode='Markdown')
@@ -269,14 +263,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token = store_url_token(context, url)
         keyboard = [
             [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl:audio:{token}")],
-            [
-                InlineKeyboardButton("360p", callback_data=f"dl:360p:{token}"),
-                InlineKeyboardButton("480p", callback_data=f"dl:480p:{token}"),
-            ],
-            [
-                InlineKeyboardButton("720p", callback_data=f"dl:720p:{token}"),
-                InlineKeyboardButton("1080p", callback_data=f"dl:1080p:{token}"),
-            ],
+            [InlineKeyboardButton("🎬 Video (MP4)", callback_data=f"dl:video:{token}")],
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
         ]
         await update.message.reply_text(
@@ -292,14 +279,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     token = store_url_token(context, url)
     keyboard = [
         [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl:audio:{token}")],
-        [
-            InlineKeyboardButton("360p", callback_data=f"dl:360p:{token}"),
-            InlineKeyboardButton("480p", callback_data=f"dl:480p:{token}"),
-        ],
-        [
-            InlineKeyboardButton("720p", callback_data=f"dl:720p:{token}"),
-            InlineKeyboardButton("1080p", callback_data=f"dl:1080p:{token}"),
-        ],
+        [InlineKeyboardButton("🎬 Video (MP4)", callback_data=f"dl:video:{token}")],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ]
     
@@ -381,7 +361,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit_message(query, "❌ Link expired. Please send the URL again.")
         return
     
-    await safe_edit_message(query, f"⏳ Downloading {quality}...\nPlease wait...")
+    label = "audio" if quality == "audio" else "video"
+    await safe_edit_message(query, f"⏳ Downloading {label}...\nPlease wait...")
     
     # Download
     filepath = await downloader.download_video(url, quality, update.effective_user.id)
@@ -413,7 +394,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=update.effective_chat.id,
                     audio=f,
                     title=filepath.stem,
-                    performer="YouTube",
+                    performer="TikTok",
                     caption=f"✅ Download complete!\n📁 Size: {size_mb:.1f} MB"
                 )
             else:
@@ -484,7 +465,7 @@ def main():
         print("  $env:BOT_TOKEN = '123456:ABC...'")
         return
     
-    print("🤖 Starting YouTube Downloader Bot...")
+    print("🤖 Starting TikTok Downloader Bot...")
     print(f"📁 Downloads folder: {DOWNLOAD_DIR.absolute()}")
     print("Press Ctrl+C to stop")
     
