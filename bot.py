@@ -4,6 +4,7 @@ YouTube Downloader Telegram Bot - Local Test Version for Windows
 
 import os
 import re
+import secrets
 import tempfile
 import urllib.parse
 import asyncio
@@ -91,6 +92,9 @@ SHOW_ERRORS = os.getenv("SHOW_ERRORS", "").strip().lower() in {"1", "true", "yes
 # Optional: proxy for yt-dlp (e.g. http://user:pass@host:port or socks5://host:port)
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
 
+# Telegram upload limit (MB). Default set conservatively.
+MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "49"))
+
 # ==================== DOWNLOAD HANDLER ====================
 class YouTubeDownloader:
     """Handles YouTube downloads"""
@@ -148,19 +152,9 @@ class YouTubeDownloader:
         try:
             async with self.semaphore:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    await asyncio.to_thread(ydl.download, [url])
-                    
-                    # Find downloaded file
-                    info = await asyncio.to_thread(ydl.extract_info, url, download=False)
-                    filename = ydl.prepare_filename(info)
-                    
-                    if quality == "audio":
-                        filename = Path(filename).with_suffix('.mp3')
-                    
-                    filepath = Path(filename)
-                    if filepath.exists():
-                        return filepath
-                    return None
+                    # Single extraction + download to avoid duplicate network calls
+                    info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+                    return self._find_downloaded_file(ydl, info, quality)
                     
         except Exception as e:
             logger.error(f"Download error: {e}")
@@ -176,6 +170,8 @@ class YouTubeDownloader:
             "geo_bypass": True,
             "nocheckcertificate": True,
             "force_ipv4": True,
+            "restrictfilenames": True,
+            "windowsfilenames": True,
             "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -197,6 +193,32 @@ class YouTubeDownloader:
             logger.error(f"Error getting video info: {e}")
             return None
 
+    def _find_downloaded_file(self, ydl: yt_dlp.YoutubeDL, info: Dict, quality: str) -> Optional[Path]:
+        try:
+            filename = ydl.prepare_filename(info)
+            base_path = Path(filename)
+            if quality == "audio":
+                candidates = [
+                    base_path.with_suffix(".mp3"),
+                    base_path.with_suffix(".m4a"),
+                    base_path.with_suffix(".webm"),
+                ]
+            else:
+                candidates = [base_path]
+
+            for candidate in candidates:
+                if candidate.exists():
+                    return candidate
+
+            # Fallback: find any file that matches stem (postprocessors may change name)
+            stem = base_path.stem
+            for file in DOWNLOAD_DIR.glob(f"{stem}*"):
+                if file.is_file():
+                    return file
+        except Exception as e:
+            logger.error(f"File locate error: {e}")
+        return None
+
 # Initialize downloader
 downloader = YouTubeDownloader()
 
@@ -215,6 +237,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ *Testing locally on Windows*"
     )
     await update.message.reply_text(welcome, parse_mode='Markdown')
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show basic diagnostics (safe to share)"""
+    if ALLOWED_USERS and update.effective_user and update.effective_user.id not in ALLOWED_USERS:
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+
+    msg = (
+        "✅ *Bot Status*\n\n"
+        f"Webhook: {'set' if WEBHOOK_URL else 'not set'}\n"
+        f"Cookies: {'set' if COOKIE_FILE_PATH else 'not set'}\n"
+        f"Proxy: {'set' if YTDLP_PROXY else 'not set'}\n"
+        f"Max upload: {MAX_UPLOAD_MB:.0f} MB"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle YouTube URLs"""
@@ -241,15 +278,16 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await processing_msg.edit_text(
             "⚠️ Couldn't fetch video info. You can still try downloading directly."
         )
+        token = store_url_token(context, url)
         keyboard = [
-            [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl_audio_{url}")],
+            [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl:audio:{token}")],
             [
-                InlineKeyboardButton("360p", callback_data=f"dl_360p_{url}"),
-                InlineKeyboardButton("480p", callback_data=f"dl_480p_{url}"),
+                InlineKeyboardButton("360p", callback_data=f"dl:360p:{token}"),
+                InlineKeyboardButton("480p", callback_data=f"dl:480p:{token}"),
             ],
             [
-                InlineKeyboardButton("720p", callback_data=f"dl_720p_{url}"),
-                InlineKeyboardButton("1080p", callback_data=f"dl_1080p_{url}"),
+                InlineKeyboardButton("720p", callback_data=f"dl:720p:{token}"),
+                InlineKeyboardButton("1080p", callback_data=f"dl:1080p:{token}"),
             ],
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
         ]
@@ -263,15 +301,16 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     duration = str(timedelta(seconds=info['duration']))
     
     # Create quality selection keyboard
+    token = store_url_token(context, url)
     keyboard = [
-        [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl_audio_{url}")],
+        [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl:audio:{token}")],
         [
-            InlineKeyboardButton("360p", callback_data=f"dl_360p_{url}"),
-            InlineKeyboardButton("480p", callback_data=f"dl_480p_{url}"),
+            InlineKeyboardButton("360p", callback_data=f"dl:360p:{token}"),
+            InlineKeyboardButton("480p", callback_data=f"dl:480p:{token}"),
         ],
         [
-            InlineKeyboardButton("720p", callback_data=f"dl_720p_{url}"),
-            InlineKeyboardButton("1080p", callback_data=f"dl_1080p_{url}"),
+            InlineKeyboardButton("720p", callback_data=f"dl:720p:{token}"),
+            InlineKeyboardButton("1080p", callback_data=f"dl:1080p:{token}"),
         ],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ]
@@ -306,38 +345,78 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+def store_url_token(context: ContextTypes.DEFAULT_TYPE, url: str) -> str:
+    token = secrets.token_urlsafe(6)
+    url_map = context.user_data.setdefault("url_map", {})
+    url_map[token] = url
+    # Keep map small
+    if len(url_map) > 50:
+        for old_key in list(url_map.keys())[:10]:
+            url_map.pop(old_key, None)
+    return token
+
+def get_url_from_token(context: ContextTypes.DEFAULT_TYPE, token: str) -> Optional[str]:
+    url_map = context.user_data.get("url_map", {})
+    return url_map.get(token)
+
+async def safe_edit_message(query, text: str) -> None:
+    try:
+        if query.message and query.message.caption is not None:
+            await query.edit_message_caption(text)
+        else:
+            await query.edit_message_text(text)
+    except Exception as e:
+        logger.error(f"Edit message error: {e}")
+        try:
+            await query.message.reply_text(text)
+        except Exception:
+            pass
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle quality selection"""
     query = update.callback_query
     await query.answer()
     
     if query.data == "cancel":
-        await query.edit_message_caption("✅ Download cancelled.")
+        await safe_edit_message(query, "✅ Download cancelled.")
         return
     
     # Parse callback
-    parts = query.data.split('_', 2)
-    if len(parts) != 3:
-        await query.edit_message_caption("❌ Invalid selection")
+    parts = query.data.split(':', 2)
+    if len(parts) != 3 or parts[0] != "dl":
+        await safe_edit_message(query, "❌ Invalid selection")
         return
     
-    _, quality, url = parts
+    _, quality, token = parts
+    url = get_url_from_token(context, token)
+    if not url:
+        await safe_edit_message(query, "❌ Link expired. Please send the URL again.")
+        return
     
-    await query.edit_message_caption(f"⏳ Downloading {quality}...\nPlease wait...")
+    await safe_edit_message(query, f"⏳ Downloading {quality}...\nPlease wait...")
     
     # Download
     filepath = await downloader.download_video(url, quality, update.effective_user.id)
     
     if not filepath or not filepath.exists():
-        await query.edit_message_caption(
+        await safe_edit_message(
+            query,
             "❌ Download failed. The video might be too long or restricted."
         )
         return
     
     # Check file size
     size_mb = filepath.stat().st_size / (1024 * 1024)
+    if size_mb > MAX_UPLOAD_MB:
+        await safe_edit_message(
+            query,
+            f"❌ File too large to upload ({size_mb:.1f} MB)."
+        )
+        if filepath.exists():
+            filepath.unlink()
+        return
     
-    await query.edit_message_caption(f"📤 Uploading... ({size_mb:.1f} MB)")
+    await safe_edit_message(query, f"📤 Uploading... ({size_mb:.1f} MB)")
     
     try:
         with open(filepath, 'rb') as f:
@@ -363,7 +442,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Upload error: {e}")
-        await query.edit_message_caption("❌ Upload failed. The file might be too large.")
+        await safe_edit_message(query, "❌ Upload failed. The file might be too large.")
         
         # Clean up even on error
         if filepath.exists():
@@ -374,9 +453,10 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Error: {context.error}")
     try:
         if update and update.effective_message:
-            await update.effective_message.reply_text(
-                "❌ An error occurred. Please try again later."
-            )
+            msg = "❌ An error occurred. Please try again later."
+            if SHOW_ERRORS and context.error:
+                msg = f"❌ Error: {context.error}"
+            await update.effective_message.reply_text(msg)
     except:
         pass
 
@@ -439,6 +519,7 @@ def main():
     
     # Add handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_error_handler(error_handler)
