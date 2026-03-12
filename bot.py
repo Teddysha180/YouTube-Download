@@ -884,6 +884,10 @@ def main():
         async def on_startup(app_web: web.Application) -> None:
             await app.initialize()
             await app.start()
+            try:
+                await app.bot.delete_webhook(drop_pending_updates=True)
+            except Exception:
+                pass
             await app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
 
         async def on_shutdown(app_web: web.Application) -> None:
