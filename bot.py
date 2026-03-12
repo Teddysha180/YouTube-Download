@@ -488,7 +488,17 @@ async def ensure_joined_channel(
             return True
     except Exception as e:
         logger.warning(f"Join check error: {e}")
+        await _send_join_error(update, context)
+        return False
 
+    await _send_join_prompt(update, context, from_callback=from_callback)
+    return False
+
+async def _send_join_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    from_callback: bool = False,
+) -> None:
     join_url = REQUIRED_CHANNEL
     if not join_url.startswith("http"):
         join_url = f"https://t.me/{join_url.lstrip('@')}"
@@ -511,9 +521,33 @@ async def ensure_joined_channel(
             await update.message.reply_text(
                 text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
             )
-    except Exception:
-        pass
-    return False
+        elif update.effective_chat:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+    except Exception as e:
+        logger.warning(f"Join prompt send error: {e}")
+
+async def _send_join_error(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    text = (
+        "⚠️ *Unable to verify channel membership.*\n\n"
+        "Please ensure the bot is an admin in the channel and try again."
+    )
+    try:
+        if update.message:
+            await update.message.reply_text(text, parse_mode="Markdown")
+        elif update.effective_chat:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, text=text, parse_mode="Markdown"
+            )
+    except Exception as e:
+        logger.warning(f"Join error send failed: {e}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle quality selection"""
