@@ -114,6 +114,9 @@ DELETE_AFTER_SEND_SECONDS = int(os.getenv("DELETE_AFTER_SEND_SECONDS", "30"))
 # Bot username to append to captions
 BOT_USERNAME = os.getenv("BOT_USERNAME", "@QuickTokDLBot").strip() or "@QuickTokDLBot"
 
+# Optional: force polling mode (useful if webhooks are blocked)
+USE_POLLING = os.getenv("USE_POLLING", "").strip().lower() in {"1", "true", "yes"}
+
 
 # ==================== DOWNLOAD HANDLER ====================
 class VideoDownloader:
@@ -775,7 +778,44 @@ def main():
     
     # Start bot
     webhook_url = WEBHOOK_URL
-    if webhook_url:
+    if USE_POLLING:
+        async def health(request: web.Request) -> web.Response:
+            return web.Response(text="OK")
+
+        async def root(request: web.Request) -> web.Response:
+            return web.Response(text="OK")
+
+        async def on_startup(app_web: web.Application) -> None:
+            try:
+                await app.initialize()
+                await app.start()
+            except Exception as e:
+                logger.error(f"Telegram app start error: {e}")
+                return
+            try:
+                await app.bot.delete_webhook(drop_pending_updates=True)
+            except Exception as e:
+                logger.warning(f"Webhook delete error: {e}")
+            try:
+                await app.updater.start_polling(drop_pending_updates=True)
+            except Exception as e:
+                logger.error(f"Polling start error: {e}")
+
+        async def on_shutdown(app_web: web.Application) -> None:
+            try:
+                await app.updater.stop()
+            except Exception:
+                pass
+            await app.stop()
+            await app.shutdown()
+
+        web_app = web.Application()
+        web_app.router.add_get("/", root)
+        web_app.router.add_get("/health", health)
+        web_app.on_startup.append(on_startup)
+        web_app.on_shutdown.append(on_shutdown)
+        web.run_app(web_app, host="0.0.0.0", port=PORT)
+    elif webhook_url:
         if WEBHOOK_PATH and not webhook_url.rstrip("/").endswith(f"/{WEBHOOK_PATH}"):
             webhook_url = f"{webhook_url.rstrip('/')}/{WEBHOOK_PATH}"
 
