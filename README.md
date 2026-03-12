@@ -4,7 +4,7 @@ A Telegram bot to download YouTube videos in various qualities or as MP3 audio.
 
 ## Local Setup
 1. Get a bot token from [@BotFather](https://t.me/BotFather).
-2. Open `bot.py` and replace `YOUR_BOT_TOKEN_HERE` with your token.
+2. Set `BOT_TOKEN` in your environment.
 3. Install [FFmpeg](https://ffmpeg.org/download.html) (required for audio extraction).
 4. Run `test.bat` or use:
    ```bash
@@ -17,3 +17,4 @@ A Telegram bot to download YouTube videos in various qualities or as MP3 audio.
 2. Connect the repository to [Render](https://dashboard.render.com).
 3. Render will auto-detect `render.yaml`.
 4. Set the `BOT_TOKEN` environment variable in the Render dashboard.
+5. After the first deploy, set `WEBHOOK_URL` to `https://<service>.onrender.com/telegram` in Render env vars.

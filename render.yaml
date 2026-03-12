@@ -3,7 +3,7 @@ services:
   - type: web
     name: youtube-downloader-bot
     runtime: python
-    pythonVersion: 3.11.0
+    pythonVersion: 3.12.7
     repo: https://github.com/Teddysha180/YouTube-Download
     plan: free
     region: oregon
@@ -14,5 +14,9 @@ services:
         sync: false  # You'll set this manually
       - key: WEBHOOK_PATH
         value: telegram
+      - key: WEBHOOK_URL
+        sync: false  # Set after deploy: https://<service>.onrender.com/telegram
       - key: ALLOWED_USERS
         value: ""  # Comma-separated user IDs, leave empty for public
+      - key: SHOW_ERRORS
+        value: "0"

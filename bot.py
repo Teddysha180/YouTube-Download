@@ -4,6 +4,8 @@ YouTube Downloader Telegram Bot - Local Test Version for Windows
 
 import os
 import re
+import json
+import re
 import secrets
 import tempfile
 import urllib.parse
@@ -11,7 +13,7 @@ import asyncio
 import logging
 import zipfile
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple, Any
 from datetime import timedelta, datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -99,6 +101,9 @@ CLEANUP_MAX_AGE_HOURS = float(os.getenv("CLEANUP_MAX_AGE_HOURS", "6"))
 
 # Delete sent files after this many seconds
 DELETE_AFTER_SEND_SECONDS = int(os.getenv("DELETE_AFTER_SEND_SECONDS", "30"))
+
+# Bot username to append to captions
+BOT_USERNAME = os.getenv("BOT_USERNAME", "@QuickTokDLBot").strip() or "@QuickTokDLBot"
 
 # ==================== DOWNLOAD HANDLER ====================
 class VideoDownloader:
@@ -287,20 +292,40 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # If info fetch fails, still allow user to try downloading directly
     if not info:
-        await processing_msg.edit_text(
-            "⚠️ Couldn't fetch video info. You can still try downloading directly."
-        )
-        token = store_url_token(context, url)
-        keyboard = [
-            [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl:audio:{token}")],
-            [InlineKeyboardButton("🎬 Video (MP4)", callback_data=f"dl:video:{token}")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-        ]
-        await update.message.reply_text(
-            "Choose quality to try:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
+        if "/photo/" in url:
+            await processing_msg.edit_text("⏳ Trying photo post fallback...")
+            images = await try_extract_images_from_html(url)
+            if images:
+                info = {
+                    "title": "TikTok Photo Post",
+                    "duration": 0,
+                    "uploader": "Unknown",
+                    "views": 0,
+                    "thumbnail": "",
+                    "images": images,
+                    "url": url,
+                }
+            else:
+                await processing_msg.edit_text(
+                    "⚠️ Couldn't fetch photo info. You can still try downloading directly."
+                )
+        else:
+            await processing_msg.edit_text(
+                "⚠️ Couldn't fetch video info. You can still try downloading directly."
+            )
+
+        if not info:
+            token = store_url_token(context, url)
+            keyboard = [
+                [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl:audio:{token}")],
+                [InlineKeyboardButton("🎬 Video (MP4)", callback_data=f"dl:video:{token}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+            ]
+            await update.message.reply_text(
+                "Choose quality to try:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
 
     # If this is a photo post, download images and send as ZIP
     if info.get("images"):
@@ -326,8 +351,17 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=update.effective_chat.id,
                     document=f,
                     filename=zip_path.name,
-                    caption=f"✅ Images downloaded!\n📁 Size: {size_mb:.1f} MB"
+                    caption=f"✅ Images downloaded!\n📁 Size: {size_mb:.1f} MB\n{BOT_USERNAME}"
                 )
+            caption_path = build_caption_file(info, update.effective_user.id)
+            if caption_path:
+                with open(caption_path, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id=update.effective_chat.id,
+                        document=f,
+                        filename=caption_path.name
+                    )
+                asyncio.create_task(delete_file_later(caption_path, DELETE_AFTER_SEND_SECONDS))
             asyncio.create_task(delete_file_later(zip_path, DELETE_AFTER_SEND_SECONDS))
             await processing_msg.delete()
         except Exception as e:
@@ -341,7 +375,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     duration = str(timedelta(seconds=info['duration']))
     
     # Create quality selection keyboard
-    token = store_url_token(context, url)
+    token = store_url_token(context, url, info)
     keyboard = [
         [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl:audio:{token}")],
         [InlineKeyboardButton("🎬 Video (MP4)", callback_data=f"dl:video:{token}")],
@@ -378,19 +412,31 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-def store_url_token(context: ContextTypes.DEFAULT_TYPE, url: str) -> str:
+def store_url_token(context: ContextTypes.DEFAULT_TYPE, url: str, info: Optional[Dict] = None) -> str:
     token = secrets.token_urlsafe(6)
     url_map = context.user_data.setdefault("url_map", {})
-    url_map[token] = url
+    if info:
+        url_map[token] = {
+            "url": url,
+            "title": info.get("title"),
+            "description": info.get("description"),
+            "uploader": info.get("uploader"),
+            "duration": info.get("duration"),
+        }
+    else:
+        url_map[token] = url
     # Keep map small
     if len(url_map) > 50:
         for old_key in list(url_map.keys())[:10]:
             url_map.pop(old_key, None)
     return token
 
-def get_url_from_token(context: ContextTypes.DEFAULT_TYPE, token: str) -> Optional[str]:
+def get_url_from_token(context: ContextTypes.DEFAULT_TYPE, token: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     url_map = context.user_data.get("url_map", {})
-    return url_map.get(token)
+    value = url_map.get(token)
+    if isinstance(value, dict):
+        return value.get("url"), value
+    return value, None
 
 async def safe_edit_message(query, text: str) -> None:
     try:
@@ -421,7 +467,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     _, quality, token = parts
-    url = get_url_from_token(context, token)
+    url, info = get_url_from_token(context, token)
     if not url:
         await safe_edit_message(query, "❌ Link expired. Please send the URL again.")
         return
@@ -460,19 +506,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     audio=f,
                     title=filepath.stem,
                     performer="TikTok",
-                    caption=f"✅ Download complete!\n📁 Size: {size_mb:.1f} MB"
+                    caption=f"✅ Download complete!\n📁 Size: {size_mb:.1f} MB\n{BOT_USERNAME}"
                 )
             else:
                 await context.bot.send_video(
                     chat_id=update.effective_chat.id,
                     video=f,
-                    caption=f"✅ Download complete!\n📁 Size: {size_mb:.1f} MB",
+                    caption=f"✅ Download complete!\n📁 Size: {size_mb:.1f} MB\n{BOT_USERNAME}",
                     supports_streaming=True
                 )
         
         # Clean up message and schedule file deletion
         await query.message.delete()
         asyncio.create_task(delete_file_later(filepath, DELETE_AFTER_SEND_SECONDS))
+
+        caption_path = build_caption_file(info, update.effective_user.id) if info else None
+        if caption_path:
+            with open(caption_path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id,
+                    document=f,
+                    filename=caption_path.name
+                )
+            asyncio.create_task(delete_file_later(caption_path, DELETE_AFTER_SEND_SECONDS))
         
     except Exception as e:
         logger.error(f"Upload error: {e}")
@@ -493,6 +549,93 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text(msg)
     except:
         pass
+
+# ==================== CAPTION FILE ====================
+def build_caption_file(info: Optional[Dict], user_id: int) -> Optional[Path]:
+    if not info:
+        return None
+    lines = []
+    if info.get("title"):
+        lines.append(f"Title: {info.get('title')}")
+    if info.get("description"):
+        lines.append(f"Description: {info.get('description')}")
+    if info.get("uploader"):
+        lines.append(f"Uploader: {info.get('uploader')}")
+    if info.get("duration") is not None:
+        lines.append(f"Duration: {info.get('duration')}")
+    if info.get("url"):
+        lines.append(f"URL: {info.get('url')}")
+
+    if not lines:
+        return None
+
+    path = DOWNLOAD_DIR / f"caption_{user_id}.txt"
+    try:
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return path
+    except Exception as e:
+        logger.error(f"Caption file error: {e}")
+        return None
+
+# ==================== PHOTO FALLBACK ====================
+def _looks_like_image_url(url: str) -> bool:
+    if not url:
+        return False
+    lower = url.lower()
+    if "tiktokcdn" not in lower and "tiktok" not in lower:
+        return False
+    return any(lower.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp"))
+
+def _collect_image_urls(obj: Any, found: set) -> None:
+    if isinstance(obj, dict):
+        for _, value in obj.items():
+            _collect_image_urls(value, found)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_image_urls(item, found)
+    elif isinstance(obj, str):
+        if _looks_like_image_url(obj):
+            found.add(obj)
+
+def _extract_json_blobs(html: str) -> list[dict]:
+    blobs = []
+    patterns = [
+        r'<script id="SIGI_STATE"[^>]*>(\{.*?\})</script>',
+        r'window\["SIGI_STATE"\]\s*=\s*(\{.*?\});',
+        r'__UNIVERSAL_DATA_FOR_REHYDRATION__\s*=\s*(\{.*?\});',
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, html, flags=re.S):
+            raw = match.group(1)
+            try:
+                blobs.append(json.loads(raw))
+            except Exception:
+                continue
+    return blobs
+
+async def try_extract_images_from_html(url: str) -> list[str]:
+    headers = {
+        "user-agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/121.0.0.0 Safari/537.36"
+        ),
+        "referer": "https://www.tiktok.com/",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            html = resp.text
+    except Exception as e:
+        logger.error(f"Photo fallback fetch error: {e}")
+        return []
+
+    images = set()
+    for blob in _extract_json_blobs(html):
+        _collect_image_urls(blob, images)
+
+    return list(images)
 
 # ==================== IMAGE HELPERS ====================
 def extract_image_urls(info: Dict) -> list[str]:
