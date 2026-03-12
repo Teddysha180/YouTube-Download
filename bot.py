@@ -243,8 +243,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Send me a TikTok link and I'll download it!\n\n"
         "Options:\n"
         "• Audio only (MP3)\n"
-        "• Video (MP4)\n\n"
-        "⚠️ *Testing locally on Windows*"
+        "• Video (MP4)\n"
     )
     await update.message.reply_text(welcome, parse_mode='Markdown')
 
