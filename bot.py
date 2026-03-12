@@ -75,17 +75,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Optional: cookies for yt-dlp (set YTDLP_COOKIES env var with Netscape cookies content)
+# Optional: cookies for yt-dlp
+# You can set YTDLP_COOKIES_FILE to a Netscape cookies file path,
+# or YTDLP_COOKIES to the raw Netscape file content (or a path).
 COOKIE_FILE_PATH = ""
+_cookies_file_env = os.getenv("YTDLP_COOKIES_FILE", "").strip()
 _cookies_env = os.getenv("YTDLP_COOKIES", "").strip()
-if _cookies_env:
-    try:
-        fd, cookie_path = tempfile.mkstemp(prefix="ytdlp_", suffix=".txt")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(_cookies_env)
-        COOKIE_FILE_PATH = cookie_path
-    except Exception as e:
-        logger.warning(f"Failed to write YTDLP_COOKIES to file: {e}")
+if _cookies_file_env and Path(_cookies_file_env).exists():
+    COOKIE_FILE_PATH = _cookies_file_env
+elif _cookies_env:
+    if Path(_cookies_env).exists():
+        COOKIE_FILE_PATH = _cookies_env
+    else:
+        try:
+            fd, cookie_path = tempfile.mkstemp(prefix="ytdlp_", suffix=".txt")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(_cookies_env)
+            COOKIE_FILE_PATH = cookie_path
+        except Exception as e:
+            logger.warning(f"Failed to write YTDLP_COOKIES to file: {e}")
 
 # Show raw yt-dlp errors to user (debug)
 SHOW_ERRORS = os.getenv("SHOW_ERRORS", "").strip().lower() in {"1", "true", "yes"}
@@ -177,6 +185,14 @@ class VideoDownloader:
                 "Chrome/121.0.0.0 Safari/537.36"
             ),
             "referer": "https://www.tiktok.com/",
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/121.0.0.0 Safari/537.36"
+                ),
+                "Referer": "https://www.tiktok.com/",
+            },
         }
         if COOKIE_FILE_PATH:
             opts["cookiefile"] = COOKIE_FILE_PATH
@@ -346,22 +362,16 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await processing_msg.edit_text(f"📤 Uploading images ZIP... ({size_mb:.1f} MB)")
         try:
+            caption_text = build_caption_text(info)
+            base_caption = f"✅ Images downloaded!\n📁 Size: {size_mb:.1f} MB"
+            full_caption = f"{base_caption}\n{caption_text}\n{BOT_USERNAME}" if caption_text else f"{base_caption}\n{BOT_USERNAME}"
             with open(zip_path, "rb") as f:
                 await context.bot.send_document(
                     chat_id=update.effective_chat.id,
                     document=f,
                     filename=zip_path.name,
-                    caption=f"✅ Images downloaded!\n📁 Size: {size_mb:.1f} MB\n{BOT_USERNAME}"
+                    caption=full_caption
                 )
-            caption_path = build_caption_file(info, update.effective_user.id)
-            if caption_path:
-                with open(caption_path, "rb") as f:
-                    await context.bot.send_document(
-                        chat_id=update.effective_chat.id,
-                        document=f,
-                        filename=caption_path.name
-                    )
-                asyncio.create_task(delete_file_later(caption_path, DELETE_AFTER_SEND_SECONDS))
             asyncio.create_task(delete_file_later(zip_path, DELETE_AFTER_SEND_SECONDS))
             await processing_msg.delete()
         except Exception as e:
@@ -499,6 +509,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_edit_message(query, f"📤 Uploading... ({size_mb:.1f} MB)")
     
     try:
+        caption_text = build_caption_text(info)
+        base_caption = f"✅ Download complete!\n📁 Size: {size_mb:.1f} MB"
+        full_caption = f"{base_caption}\n{caption_text}\n{BOT_USERNAME}" if caption_text else f"{base_caption}\n{BOT_USERNAME}"
         with open(filepath, 'rb') as f:
             if quality == "audio":
                 await context.bot.send_audio(
@@ -506,13 +519,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     audio=f,
                     title=filepath.stem,
                     performer="TikTok",
-                    caption=f"✅ Download complete!\n📁 Size: {size_mb:.1f} MB\n{BOT_USERNAME}"
+                    caption=full_caption
                 )
             else:
                 await context.bot.send_video(
                     chat_id=update.effective_chat.id,
                     video=f,
-                    caption=f"✅ Download complete!\n📁 Size: {size_mb:.1f} MB\n{BOT_USERNAME}",
+                    caption=full_caption,
                     supports_streaming=True
                 )
         
@@ -520,16 +533,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete()
         asyncio.create_task(delete_file_later(filepath, DELETE_AFTER_SEND_SECONDS))
 
-        caption_path = build_caption_file(info, update.effective_user.id) if info else None
-        if caption_path:
-            with open(caption_path, "rb") as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=caption_path.name
-                )
-            asyncio.create_task(delete_file_later(caption_path, DELETE_AFTER_SEND_SECONDS))
-        
     except Exception as e:
         logger.error(f"Upload error: {e}")
         await safe_edit_message(query, "❌ Upload failed. The file might be too large.")
@@ -550,10 +553,10 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-# ==================== CAPTION FILE ====================
-def build_caption_file(info: Optional[Dict], user_id: int) -> Optional[Path]:
+# ==================== CAPTION TEXT ====================
+def build_caption_text(info: Optional[Dict]) -> str:
     if not info:
-        return None
+        return ""
     lines = []
     if info.get("title"):
         lines.append(f"Title: {info.get('title')}")
@@ -565,17 +568,7 @@ def build_caption_file(info: Optional[Dict], user_id: int) -> Optional[Path]:
         lines.append(f"Duration: {info.get('duration')}")
     if info.get("url"):
         lines.append(f"URL: {info.get('url')}")
-
-    if not lines:
-        return None
-
-    path = DOWNLOAD_DIR / f"caption_{user_id}.txt"
-    try:
-        path.write_text("\n".join(lines), encoding="utf-8")
-        return path
-    except Exception as e:
-        logger.error(f"Caption file error: {e}")
-        return None
+    return "\n".join(lines)
 
 # ==================== PHOTO FALLBACK ====================
 def _looks_like_image_url(url: str) -> bool:
@@ -584,7 +577,11 @@ def _looks_like_image_url(url: str) -> bool:
     lower = url.lower()
     if "tiktokcdn" not in lower and "tiktok" not in lower:
         return False
-    return any(lower.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp"))
+    try:
+        path = urllib.parse.urlparse(lower).path
+    except Exception:
+        path = lower
+    return any(ext in path for ext in (".jpg", ".jpeg", ".png", ".webp"))
 
 def _collect_image_urls(obj: Any, found: set) -> None:
     if isinstance(obj, dict):
@@ -621,9 +618,18 @@ async def try_extract_images_from_html(url: str) -> list[str]:
             "Chrome/121.0.0.0 Safari/537.36"
         ),
         "referer": "https://www.tiktok.com/",
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     try:
-        async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
+        cookies = None
+        if COOKIE_FILE_PATH and Path(COOKIE_FILE_PATH).exists():
+            cookies = _load_netscape_cookies(COOKIE_FILE_PATH)
+        async with httpx.AsyncClient(
+            timeout=30.0,
+            headers=headers,
+            cookies=cookies,
+            follow_redirects=True,
+        ) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             html = resp.text
@@ -636,6 +642,23 @@ async def try_extract_images_from_html(url: str) -> list[str]:
         _collect_image_urls(blob, images)
 
     return list(images)
+
+def _load_netscape_cookies(path: str) -> httpx.Cookies:
+    cookies = httpx.Cookies()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                domain, _, cookie_path, _, _, name, value = parts[:7]
+                cookies.set(name, value, domain=domain, path=cookie_path)
+    except Exception as e:
+        logger.error(f"Cookie parse error: {e}")
+    return cookies
 
 # ==================== IMAGE HELPERS ====================
 def extract_image_urls(info: Dict) -> list[str]:
