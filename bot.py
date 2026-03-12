@@ -96,8 +96,8 @@ YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
 MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "49"))
 
 # ==================== DOWNLOAD HANDLER ====================
-class YouTubeDownloader:
-    """Handles YouTube downloads"""
+class VideoDownloader:
+    """Handles TikTok downloads"""
     
     def __init__(self):
         self.semaphore = asyncio.Semaphore(1)  # One download at a time for testing
@@ -109,19 +109,7 @@ class YouTubeDownloader:
             "skip_download": True,
         })
 
-        # First attempt: default extractor behavior
         info = await self._try_extract(url, base)
-        if not info:
-            # Second attempt: force alternate YouTube clients
-            alt = dict(base)
-            alt["extractor_args"] = {
-                "youtube": {
-                    "player_client": ["android", "web", "ios"],
-                    "skip": ["dash", "hls"],
-                }
-            }
-            info = await self._try_extract(url, alt)
-
         if not info:
             return None
 
@@ -177,7 +165,7 @@ class YouTubeDownloader:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/121.0.0.0 Safari/537.36"
             ),
-            "referer": "https://www.youtube.com/",
+            "referer": "https://www.tiktok.com/",
         }
         if COOKIE_FILE_PATH:
             opts["cookiefile"] = COOKIE_FILE_PATH
@@ -220,14 +208,14 @@ class YouTubeDownloader:
         return None
 
 # Initialize downloader
-downloader = YouTubeDownloader()
+downloader = VideoDownloader()
 
 # ==================== TELEGRAM HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     welcome = (
-        "🎥 *YouTube Downloader Bot*\n\n"
-        "Send me a YouTube link and I'll download it!\n\n"
+        "🎥 *TikTok Downloader Bot*\n\n"
+        "Send me a TikTok link and I'll download it!\n\n"
         "Available qualities:\n"
         "• Audio only (MP3)\n"
         "• 360p\n"
@@ -254,16 +242,16 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle YouTube URLs"""
+    """Handle TikTok URLs"""
     url = update.message.text.strip()
 
     if ALLOWED_USERS and update.effective_user and update.effective_user.id not in ALLOWED_USERS:
         await update.message.reply_text("❌ You are not authorized to use this bot.")
         return
 
-    # URL validation (supports watch, shorts, live, music, youtu.be)
-    if not is_valid_youtube_url(url):
-        await update.message.reply_text("❌ Please send a valid YouTube URL")
+    # URL validation (supports tiktok.com and vm.tiktok.com)
+    if not is_valid_tiktok_url(url):
+        await update.message.reply_text("❌ Please send a valid TikTok URL")
         return
     
     await update.message.chat.send_action(action="typing")
@@ -461,15 +449,14 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 # ==================== URL HELPERS ====================
-YOUTUBE_HOSTS = {
-    "youtube.com",
-    "www.youtube.com",
-    "m.youtube.com",
-    "music.youtube.com",
-    "youtu.be",
+TIKTOK_HOSTS = {
+    "tiktok.com",
+    "www.tiktok.com",
+    "m.tiktok.com",
+    "vm.tiktok.com",
 }
 
-def is_valid_youtube_url(url: str) -> bool:
+def is_valid_tiktok_url(url: str) -> bool:
     try:
         parsed = urllib.parse.urlparse(url)
     except Exception:
@@ -479,21 +466,14 @@ def is_valid_youtube_url(url: str) -> bool:
         return False
 
     host = (parsed.netloc or "").lower()
-    if host not in YOUTUBE_HOSTS:
+    if host not in TIKTOK_HOSTS:
         return False
 
     path = parsed.path or ""
-    if host == "youtu.be":
+    # TikTok links typically include /@user/video/<id> or short vm.tiktok.com/<id>
+    if host == "vm.tiktok.com":
         return bool(path.strip("/"))
-
-    # Accept watch, shorts, live, or embed
-    if path.startswith("/watch"):
-        qs = urllib.parse.parse_qs(parsed.query or "")
-        return "v" in qs and qs["v"]
-    if re.match(r"^/(shorts|live|embed)/[^/]+", path):
-        return True
-
-    return False
+    return "/video/" in path or path.strip("/") != ""
 
 # ==================== MAIN ====================
 def main():
