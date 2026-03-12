@@ -114,8 +114,6 @@ DELETE_AFTER_SEND_SECONDS = int(os.getenv("DELETE_AFTER_SEND_SECONDS", "30"))
 # Bot username to append to captions
 BOT_USERNAME = os.getenv("BOT_USERNAME", "@QuickTokDLBot").strip() or "@QuickTokDLBot"
 
-# Channel join requirement (set to @channelusername or channel ID)
-REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()
 
 # ==================== DOWNLOAD HANDLER ====================
 class VideoDownloader:
@@ -266,8 +264,6 @@ async def delete_file_later(path: Path, delay_seconds: int) -> None:
 # ==================== TELEGRAM HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
-    if not await ensure_joined_channel(update, context):
-        return
     welcome = (
         "🎥 *TikTok Downloader Bot*\n\n"
         "Send me a TikTok link and I'll download it!\n\n"
@@ -279,8 +275,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show basic diagnostics (safe to share)"""
-    if not await ensure_joined_channel(update, context):
-        return
     if ALLOWED_USERS and update.effective_user and update.effective_user.id not in ALLOWED_USERS:
         await update.message.reply_text("❌ You are not authorized to use this bot.")
         return
@@ -298,8 +292,6 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle TikTok URLs"""
     url = update.message.text.strip()
 
-    if not await ensure_joined_channel(update, context):
-        return
     if ALLOWED_USERS and update.effective_user and update.effective_user.id not in ALLOWED_USERS:
         await update.message.reply_text("❌ You are not authorized to use this bot.")
         return
@@ -471,93 +463,11 @@ async def safe_edit_message(query, text: str) -> None:
         except Exception:
             pass
 
-async def ensure_joined_channel(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    from_callback: bool = False,
-) -> bool:
-    """Require user to join channel before using the bot."""
-    if not REQUIRED_CHANNEL:
-        return True
-    user = update.effective_user
-    if not user:
-        return False
-    try:
-        member = await context.bot.get_chat_member(REQUIRED_CHANNEL, user.id)
-        if member.status in {"member", "administrator", "creator"}:
-            return True
-    except Exception as e:
-        logger.warning(f"Join check error: {e}")
-        await _send_join_error(update, context)
-        return False
-
-    await _send_join_prompt(update, context, from_callback=from_callback)
-    return False
-
-async def _send_join_prompt(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    from_callback: bool = False,
-) -> None:
-    join_url = REQUIRED_CHANNEL
-    if not join_url.startswith("http"):
-        join_url = f"https://t.me/{join_url.lstrip('@')}"
-
-    keyboard = [
-        [InlineKeyboardButton("📢 Join Channel", url=join_url)],
-        [InlineKeyboardButton("✅ I Joined", callback_data="check_join")],
-    ]
-    text = (
-        "🔒 *Join Required*\n\n"
-        "Please join our channel first to use this bot.\n"
-        "After joining, tap ✅ I Joined."
-    )
-    try:
-        if from_callback and update.callback_query:
-            await update.callback_query.message.reply_text(
-                text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        elif update.message:
-            await update.message.reply_text(
-                text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        elif update.effective_chat:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=text,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-    except Exception as e:
-        logger.warning(f"Join prompt send error: {e}")
-
-async def _send_join_error(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    text = (
-        "⚠️ *Unable to verify channel membership.*\n\n"
-        "Please ensure the bot is an admin in the channel and try again."
-    )
-    try:
-        if update.message:
-            await update.message.reply_text(text, parse_mode="Markdown")
-        elif update.effective_chat:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id, text=text, parse_mode="Markdown"
-            )
-    except Exception as e:
-        logger.warning(f"Join error send failed: {e}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle quality selection"""
     query = update.callback_query
     await query.answer()
-
-    if query.data == "check_join":
-        if await ensure_joined_channel(update, context, from_callback=True):
-            await safe_edit_message(query, "✅ Thanks for joining! Send a TikTok link.")
-        return
 
     if query.data == "cancel":
         await safe_edit_message(query, "✅ Download cancelled.")
