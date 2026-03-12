@@ -9,6 +9,7 @@ import tempfile
 import urllib.parse
 import asyncio
 import logging
+import zipfile
 from pathlib import Path
 from typing import Optional, Dict
 from datetime import timedelta, datetime
@@ -24,6 +25,7 @@ from telegram.ext import (
     ContextTypes
 )
 import yt_dlp
+import httpx
 
 # ==================== CONFIGURATION ====================
 # Bot token should come from environment to avoid hardcoding secrets
@@ -122,6 +124,7 @@ class VideoDownloader:
             "uploader": info.get("uploader", "Unknown"),
             "views": info.get("view_count", 0),
             "thumbnail": info.get("thumbnail", ""),
+            "images": extract_image_urls(info),
             "url": url
         }
     
@@ -299,6 +302,41 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # If this is a photo post, download images and send as ZIP
+    if info.get("images"):
+        await processing_msg.edit_text("⏳ Downloading images...")
+        zip_path = await download_images_as_zip(info["images"], update.effective_user.id)
+        if not zip_path or not zip_path.exists():
+            await processing_msg.edit_text("❌ Failed to download images.")
+            return
+
+        size_mb = zip_path.stat().st_size / (1024 * 1024)
+        if size_mb > MAX_UPLOAD_MB:
+            await processing_msg.edit_text(
+                f"❌ ZIP too large to upload ({size_mb:.1f} MB)."
+            )
+            if zip_path.exists():
+                zip_path.unlink()
+            return
+
+        await processing_msg.edit_text(f"📤 Uploading images ZIP... ({size_mb:.1f} MB)")
+        try:
+            with open(zip_path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id,
+                    document=f,
+                    filename=zip_path.name,
+                    caption=f"✅ Images downloaded!\n📁 Size: {size_mb:.1f} MB"
+                )
+            asyncio.create_task(delete_file_later(zip_path, DELETE_AFTER_SEND_SECONDS))
+            await processing_msg.delete()
+        except Exception as e:
+            logger.error(f"ZIP upload error: {e}")
+            await processing_msg.edit_text("❌ Upload failed.")
+            if zip_path.exists():
+                zip_path.unlink()
+        return
+
     # Format duration
     duration = str(timedelta(seconds=info['duration']))
     
@@ -455,6 +493,58 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text(msg)
     except:
         pass
+
+# ==================== IMAGE HELPERS ====================
+def extract_image_urls(info: Dict) -> list[str]:
+    images: list[str] = []
+
+    # Common keys for TikTok photo posts
+    for item in info.get("images", []):
+        url = item.get("url") or item.get("src") or item.get("image_url")
+        if url:
+            images.append(url)
+
+    # Some extractors expose entries
+    for entry in info.get("entries", []) or []:
+        if isinstance(entry, dict):
+            url = entry.get("url") or entry.get("src") or entry.get("image_url")
+            if url:
+                images.append(url)
+
+    # Deduplicate while preserving order
+    seen = set()
+    deduped = []
+    for u in images:
+        if u not in seen:
+            seen.add(u)
+            deduped.append(u)
+    return deduped
+
+async def download_images_as_zip(urls: list[str], user_id: int) -> Optional[Path]:
+    if not urls:
+        return None
+
+    zip_path = DOWNLOAD_DIR / f"tiktok_images_{user_id}.zip"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for i, url in enumerate(urls, start=1):
+                    try:
+                        resp = await client.get(url)
+                        resp.raise_for_status()
+                        filename = f"image_{i}.jpg"
+                        zf.writestr(filename, resp.content)
+                    except Exception as e:
+                        logger.error(f"Image download error ({url}): {e}")
+                        continue
+
+        return zip_path if zip_path.exists() else None
+    except Exception as e:
+        logger.error(f"ZIP build error: {e}")
+        if zip_path.exists():
+            zip_path.unlink()
+        return None
 
 # ==================== URL HELPERS ====================
 TIKTOK_HOSTS = {
