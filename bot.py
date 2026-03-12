@@ -28,6 +28,7 @@ from telegram.ext import (
 )
 import yt_dlp
 import httpx
+from aiohttp import web
 
 # ==================== CONFIGURATION ====================
 # Bot token should come from environment to avoid hardcoding secrets
@@ -773,17 +774,41 @@ def main():
     # Start bot
     webhook_url = WEBHOOK_URL
     if webhook_url:
-        # Ensure webhook_url matches the configured path
         if WEBHOOK_PATH and not webhook_url.rstrip("/").endswith(f"/{WEBHOOK_PATH}"):
             webhook_url = f"{webhook_url.rstrip('/')}/{WEBHOOK_PATH}"
 
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=WEBHOOK_PATH,
-            webhook_url=webhook_url,
-            allowed_updates=Update.ALL_TYPES,
-        )
+        async def telegram_webhook(request: web.Request) -> web.Response:
+            try:
+                data = await request.json()
+                update = Update.de_json(data, app.bot)
+                await app.process_update(update)
+            except Exception as e:
+                logger.error(f"Webhook handler error: {e}")
+            return web.Response(text="OK")
+
+        async def health(request: web.Request) -> web.Response:
+            return web.Response(text="OK")
+
+        async def on_startup(app_web: web.Application) -> None:
+            await app.initialize()
+            await app.start()
+            await app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
+
+        async def on_shutdown(app_web: web.Application) -> None:
+            try:
+                await app.bot.delete_webhook()
+            except Exception:
+                pass
+            await app.stop()
+            await app.shutdown()
+
+        web_app = web.Application()
+        web_app.router.add_get("/health", health)
+        web_app.router.add_post(f"/{WEBHOOK_PATH}", telegram_webhook)
+        web_app.on_startup.append(on_startup)
+        web_app.on_shutdown.append(on_shutdown)
+
+        web.run_app(web_app, host="0.0.0.0", port=PORT)
     else:
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
