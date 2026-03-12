@@ -95,6 +95,9 @@ MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "49"))
 # Auto-cleaner: delete files older than this many hours
 CLEANUP_MAX_AGE_HOURS = float(os.getenv("CLEANUP_MAX_AGE_HOURS", "6"))
 
+# Delete sent files after this many seconds
+DELETE_AFTER_SEND_SECONDS = int(os.getenv("DELETE_AFTER_SEND_SECONDS", "30"))
+
 # ==================== DOWNLOAD HANDLER ====================
 class VideoDownloader:
     """Handles TikTok downloads"""
@@ -223,6 +226,14 @@ def cleanup_downloads() -> None:
                 logger.error(f"Cleanup error for {file}: {e}")
     except Exception as e:
         logger.error(f"Cleanup error: {e}")
+
+async def delete_file_later(path: Path, delay_seconds: int) -> None:
+    try:
+        await asyncio.sleep(delay_seconds)
+        if path.exists():
+            path.unlink()
+    except Exception as e:
+        logger.error(f"Delayed delete error for {path}: {e}")
 
 # ==================== TELEGRAM HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -422,9 +433,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     supports_streaming=True
                 )
         
-        # Clean up
-        filepath.unlink()
+        # Clean up message and schedule file deletion
         await query.message.delete()
+        asyncio.create_task(delete_file_later(filepath, DELETE_AFTER_SEND_SECONDS))
         
     except Exception as e:
         logger.error(f"Upload error: {e}")
