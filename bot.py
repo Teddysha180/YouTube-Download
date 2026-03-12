@@ -791,14 +791,26 @@ def main():
         async def health(request: web.Request) -> web.Response:
             return web.Response(text="OK")
 
+        async def root(request: web.Request) -> web.Response:
+            return web.Response(text="OK")
+
         async def on_startup(app_web: web.Application) -> None:
-            await app.initialize()
-            await app.start()
+            try:
+                await app.initialize()
+                await app.start()
+            except Exception as e:
+                logger.error(f"Telegram app start error: {e}")
+                return
+
             try:
                 await app.bot.delete_webhook(drop_pending_updates=True)
-            except Exception:
-                pass
-            await app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
+            except Exception as e:
+                logger.warning(f"Webhook delete error: {e}")
+
+            try:
+                await app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
+            except Exception as e:
+                logger.error(f"Webhook set error: {e}")
 
         async def on_shutdown(app_web: web.Application) -> None:
             try:
@@ -809,6 +821,7 @@ def main():
             await app.shutdown()
 
         web_app = web.Application()
+        web_app.router.add_get("/", root)
         web_app.router.add_get("/health", health)
         web_app.router.add_post(f"/{WEBHOOK_PATH}", telegram_webhook)
         web_app.on_startup.append(on_startup)
