@@ -11,7 +11,7 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Optional, Dict
-from datetime import timedelta
+from datetime import timedelta, datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.request import HTTPXRequest
@@ -91,6 +91,9 @@ YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
 
 # Telegram upload limit (MB). Default set conservatively.
 MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "49"))
+
+# Auto-cleaner: delete files older than this many hours
+CLEANUP_MAX_AGE_HOURS = float(os.getenv("CLEANUP_MAX_AGE_HOURS", "6"))
 
 # ==================== DOWNLOAD HANDLER ====================
 class VideoDownloader:
@@ -206,6 +209,20 @@ class VideoDownloader:
 
 # Initialize downloader
 downloader = VideoDownloader()
+
+# ==================== CLEANUP ====================
+def cleanup_downloads() -> None:
+    """Remove old files from downloads folder."""
+    try:
+        cutoff = datetime.utcnow().timestamp() - (CLEANUP_MAX_AGE_HOURS * 3600)
+        for file in DOWNLOAD_DIR.glob("*"):
+            try:
+                if file.is_file() and file.stat().st_mtime < cutoff:
+                    file.unlink()
+            except Exception as e:
+                logger.error(f"Cleanup error for {file}: {e}")
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
 
 # ==================== TELEGRAM HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -468,6 +485,8 @@ def main():
     print("🤖 Starting TikTok Downloader Bot...")
     print(f"📁 Downloads folder: {DOWNLOAD_DIR.absolute()}")
     print("Press Ctrl+C to stop")
+
+    cleanup_downloads()
     
     # Create application with explicit timeouts to tolerate slow networks
     request = HTTPXRequest(
