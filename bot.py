@@ -76,6 +76,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Log join-gate configuration at startup for troubleshooting
+if REQUIRED_CHANNEL:
+    logger.info(
+        "Join gate enabled. REQUIRED_CHANNEL=%s REQUIRED_CHANNEL_URL=%s",
+        REQUIRED_CHANNEL,
+        REQUIRED_CHANNEL_URL or "(not set)",
+    )
+else:
+    logger.warning("Join gate disabled: REQUIRED_CHANNEL is empty")
+
 # Optional: cookies for yt-dlp
 # You can set YTDLP_COOKIES_FILE to a Netscape cookies file path,
 # or YTDLP_COOKIES to the raw Netscape file content (or a path).
