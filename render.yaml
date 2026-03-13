@@ -18,5 +18,9 @@ services:
         sync: false  # Set after deploy: https://<service>.onrender.com/telegram
       - key: ALLOWED_USERS
         value: ""  # Comma-separated user IDs, leave empty for public
+      - key: REQUIRED_CHANNEL
+        value: "@arts_of_drawings"
+      - key: REQUIRED_CHANNEL_URL
+        value: "https://t.me/arts_of_drawings"
       - key: SHOW_ERRORS
         value: "0"
