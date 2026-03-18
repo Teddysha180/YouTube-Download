@@ -5,7 +5,6 @@ YouTube Downloader Telegram Bot - Local Test Version for Windows
 import os
 import re
 import json
-import re
 import secrets
 import tempfile
 import urllib.parse
@@ -54,6 +53,12 @@ ALLOWED_USERS = {
     for x in os.getenv("ALLOWED_USERS", "").split(",")
     if x.strip().isdigit()
 }
+
+# Optional: require users to join a channel before using the bot
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()
+REQUIRED_CHANNEL_URL = os.getenv("REQUIRED_CHANNEL_URL", "").strip()
+if REQUIRED_CHANNEL and not REQUIRED_CHANNEL_URL and REQUIRED_CHANNEL.startswith("@"):
+    REQUIRED_CHANNEL_URL = f"https://t.me/{REQUIRED_CHANNEL.lstrip('@')}"
 
 # Quality options (keep it simple: audio or video)
 QUALITY_OPTIONS = {
@@ -127,6 +132,10 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "@QuickTokDLBot").strip() or "@QuickTok
 # Optional: force polling mode (useful if webhooks are blocked)
 USE_POLLING = os.getenv("USE_POLLING", "").strip().lower() in {"1", "true", "yes"}
 
+# Retry tuning for intermittent TikTok failures
+INFO_RETRIES = int(os.getenv("INFO_RETRIES", "2"))
+DOWNLOAD_RETRIES = int(os.getenv("DOWNLOAD_RETRIES", "2"))
+
 
 # ==================== DOWNLOAD HANDLER ====================
 class VideoDownloader:
@@ -137,12 +146,15 @@ class VideoDownloader:
     
     async def get_video_info(self, url: str) -> Optional[Dict]:
         """Extract video information"""
-        base = self._base_ydl_opts()
-        base.update({
-            "skip_download": True,
-        })
-
-        info = await self._try_extract(url, base)
+        info = None
+        for attempt in range(INFO_RETRIES + 1):
+            base = self._base_ydl_opts()
+            base.update({"skip_download": True})
+            info = await self._try_extract(url, base)
+            if info:
+                break
+            if attempt < INFO_RETRIES:
+                await asyncio.sleep(1.0 + attempt)
         if not info:
             return None
 
@@ -160,27 +172,41 @@ class VideoDownloader:
         """Download video"""
         
         if quality not in QUALITY_OPTIONS:
-            quality = "480p"
+            quality = "video"
         
         quality_config = QUALITY_OPTIONS[quality]
         output_template = str(DOWNLOAD_DIR / f"%(title)s_{user_id}.%(ext)s")
-        
-        ydl_opts = self._base_ydl_opts()
-        ydl_opts.update({
-            "outtmpl": output_template,
-            **quality_config
-        })
-        
-        try:
-            async with self.semaphore:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    # Single extraction + download to avoid duplicate network calls
-                    info = await asyncio.to_thread(ydl.extract_info, url, download=True)
-                    return self._find_downloaded_file(ydl, info, quality)
-                    
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            return None
+
+        async with self.semaphore:
+            for attempt in range(DOWNLOAD_RETRIES + 1):
+                ydl_opts = self._base_ydl_opts()
+                ydl_opts.update({
+                    "outtmpl": output_template,
+                    **quality_config
+                })
+
+                # Fallback mode on retries: avoid fetching playlist/comments
+                if attempt > 0:
+                    ydl_opts["extractor_args"] = {
+                        "tiktok": {
+                            "app_info": ["musical_ly"],
+                            "api_hostname": ["api16-normal-c-useast1a.tiktokv.com"],
+                        }
+                    }
+
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = await asyncio.to_thread(ydl.extract_info, url, download=True)
+                        found = self._find_downloaded_file(ydl, info, quality)
+                        if found:
+                            return found
+                except Exception as e:
+                    logger.error(f"Download attempt {attempt + 1} failed: {e}")
+                    if attempt < DOWNLOAD_RETRIES:
+                        await asyncio.sleep(1.0 + attempt)
+                        continue
+                    return None
+        return None
 
     def _base_ydl_opts(self) -> Dict:
         opts = {
@@ -275,49 +301,137 @@ async def delete_file_later(path: Path, delay_seconds: int) -> None:
         logger.error(f"Delayed delete error for {path}: {e}")
 
 # ==================== TELEGRAM HANDLERS ====================
+def build_main_menu() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton("Download Audio", callback_data="ui:hint_audio")],
+        [InlineKeyboardButton("Download Video", callback_data="ui:hint_video")],
+        [InlineKeyboardButton("How To Use", callback_data="ui:help")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def quality_keyboard(token: str) -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton("Audio (MP3)", callback_data=f"dl:audio:{token}")],
+        [InlineKeyboardButton("Video (MP4)", callback_data=f"dl:video:{token}")],
+        [InlineKeyboardButton("Cancel", callback_data="cancel")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def pretty_duration(seconds: int) -> str:
+    if not seconds:
+        return "Unknown"
+    return str(timedelta(seconds=seconds))
+
+def feature_help_text() -> str:
+    return (
+        "How this bot works:\n"
+        "1. Send any TikTok link.\n"
+        "2. Pick Audio or Video.\n"
+        "3. Wait for upload.\n\n"
+        "Tips for better success:\n"
+        "- If a download fails, retry after 10 to 30 seconds.\n"
+        "- Private/restricted posts may fail.\n"
+        "- Some links need cookies configured in Render."
+    )
+
+def transient_failure_text() -> str:
+    return (
+        "Download failed. TikTok sometimes blocks requests temporarily.\n"
+        "Please try again in 10-30 seconds or send another link."
+    )
+
+async def ensure_joined(update: Update, context: ContextTypes.DEFAULT_TYPE, from_callback: bool = False) -> bool:
+    if not REQUIRED_CHANNEL:
+        return True
+
+    user = update.effective_user
+    if not user:
+        return False
+
+    try:
+        member = await context.bot.get_chat_member(REQUIRED_CHANNEL, user.id)
+        if getattr(member, "status", "") in {"member", "administrator", "creator"}:
+            return True
+    except Exception as e:
+        logger.warning(f"Join check failed for {user.id}: {e}")
+
+    await send_join_required(update, from_callback=from_callback)
+    return False
+
+async def send_join_required(update: Update, from_callback: bool = False) -> None:
+    text = (
+        "Join Required\n\n"
+        "Please join our channel first to use this bot.\n"
+        "After joining, tap I Joined."
+    )
+    keyboard = []
+    if REQUIRED_CHANNEL_URL:
+        keyboard.append([InlineKeyboardButton("Join Channel", url=REQUIRED_CHANNEL_URL)])
+    keyboard.append([InlineKeyboardButton("I Joined", callback_data="join_check")])
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if from_callback and update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(text, reply_markup=markup)
+        return
+    if update.effective_message:
+        await update.effective_message.reply_text(text, reply_markup=markup)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
+    if not await ensure_joined(update, context):
+        return
     welcome = (
-        "🎥 *TikTok Downloader Bot*\n\n"
-        "Send me a TikTok link and I'll download it!\n\n"
-        "Options:\n"
-        "• Audio only (MP3)\n"
-        "• Video (MP4)\n"
+        "TikTok Downloader\n\n"
+        "Send a TikTok link and I will prepare it for download.\n\n"
+        "Available:\n"
+        "- Audio (MP3)\n"
+        "- Video (MP4)\n\n"
+        "Use /help for tips."
     )
-    await update.message.reply_text(welcome, parse_mode='Markdown')
+    await update.message.reply_text(welcome, reply_markup=build_main_menu())
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_joined(update, context):
+        return
+    await update.message.reply_text(feature_help_text())
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show basic diagnostics (safe to share)"""
+    if not await ensure_joined(update, context):
+        return
     if ALLOWED_USERS and update.effective_user and update.effective_user.id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        await update.message.reply_text("You are not authorized to use this bot.")
         return
 
     msg = (
-        "✅ *Bot Status*\n\n"
+        "Bot Status\n\n"
         f"Webhook: {'set' if WEBHOOK_URL else 'not set'}\n"
         f"Cookies: {'set' if COOKIE_FILE_PATH else 'not set'}\n"
+        f"Join gate: {'enabled' if REQUIRED_CHANNEL else 'disabled'}\n"
         f"Proxy: {'set' if YTDLP_PROXY else 'not set'}\n"
         f"Max upload: {MAX_UPLOAD_MB:.0f} MB"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg)
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle TikTok URLs"""
+    if not await ensure_joined(update, context):
+        return
     url = update.message.text.strip()
 
     if ALLOWED_USERS and update.effective_user and update.effective_user.id not in ALLOWED_USERS:
-        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        await update.message.reply_text("You are not authorized to use this bot.")
         return
 
     # URL validation (supports tiktok.com and vm.tiktok.com)
     if not is_valid_tiktok_url(url):
-        await update.message.reply_text("❌ Please send a valid TikTok URL")
+        await update.message.reply_text("Please send a valid TikTok URL.")
         return
     
     await update.message.chat.send_action(action="typing")
     
     # Send "processing" message
-    processing_msg = await update.message.reply_text("⏳ Fetching video information...")
+    processing_msg = await update.message.reply_text("Checking link...")
     
     info = await downloader.get_video_info(url)
     
@@ -337,48 +451,39 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "url": url,
                 }
             else:
-                await processing_msg.edit_text(
-                    "⚠️ Couldn't fetch photo info. You can still try downloading directly."
-                )
+                await processing_msg.edit_text("Could not fetch photo info. Trying direct download options.")
         else:
-            await processing_msg.edit_text(
-                "⚠️ Couldn't fetch video info. You can still try downloading directly."
-            )
+            await processing_msg.edit_text("Could not fetch video info. Trying direct download options.")
 
         if not info:
             token = store_url_token(context, url)
-            keyboard = [
-                [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl:audio:{token}")],
-                [InlineKeyboardButton("🎬 Video (MP4)", callback_data=f"dl:video:{token}")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-            ]
             await update.message.reply_text(
-                "Choose quality to try:",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                "Pick a format and I will retry download:",
+                reply_markup=quality_keyboard(token)
             )
             return
 
     # If this is a photo post, download images and send as ZIP
     if info.get("images"):
-        await processing_msg.edit_text("⏳ Downloading images...")
+        await processing_msg.edit_text("Downloading images...")
         zip_path = await download_images_as_zip(info["images"], update.effective_user.id)
         if not zip_path or not zip_path.exists():
-            await processing_msg.edit_text("❌ Failed to download images.")
+            await processing_msg.edit_text("Failed to download images.")
             return
 
         size_mb = zip_path.stat().st_size / (1024 * 1024)
         if size_mb > MAX_UPLOAD_MB:
             await processing_msg.edit_text(
-                f"❌ ZIP too large to upload ({size_mb:.1f} MB)."
+                f"ZIP too large to upload ({size_mb:.1f} MB)."
             )
             if zip_path.exists():
                 zip_path.unlink()
             return
 
-        await processing_msg.edit_text(f"📤 Uploading images ZIP... ({size_mb:.1f} MB)")
+        await processing_msg.edit_text(f"Uploading images ZIP... ({size_mb:.1f} MB)")
         try:
             caption_text = build_caption_text(info)
-            base_caption = f"✅ Images downloaded!\n📁 Size: {size_mb:.1f} MB"
+            base_caption = f"Images downloaded.\nSize: {size_mb:.1f} MB"
             full_caption = f"{base_caption}\n{caption_text}\n{BOT_USERNAME}" if caption_text else f"{base_caption}\n{BOT_USERNAME}"
             with open(zip_path, "rb") as f:
                 await context.bot.send_document(
@@ -391,28 +496,20 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_msg.delete()
         except Exception as e:
             logger.error(f"ZIP upload error: {e}")
-            await processing_msg.edit_text("❌ Upload failed.")
+            await processing_msg.edit_text("Upload failed.")
             if zip_path.exists():
                 zip_path.unlink()
         return
 
-    # Format duration
-    duration = str(timedelta(seconds=info['duration']))
-    
-    # Create quality selection keyboard
+    duration = pretty_duration(info['duration'])
     token = store_url_token(context, url, info)
-    keyboard = [
-        [InlineKeyboardButton("🎵 Audio Only (MP3)", callback_data=f"dl:audio:{token}")],
-        [InlineKeyboardButton("🎬 Video (MP4)", callback_data=f"dl:video:{token}")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-    ]
     
     caption = (
-        f"📹 *{info['title'][:50]}*...\n" if len(info['title']) > 50 else f"📹 *{info['title']}*\n"
-        f"👤 {info['uploader']}\n"
-        f"⏱️ {duration}\n"
-        f"👀 {info['views']:,} views\n\n"
-        f"Choose quality:"
+        f"{info['title'][:50]}...\n" if len(info['title']) > 50 else f"{info['title']}\n"
+        f"Creator: {info['uploader']}\n"
+        f"Duration: {duration}\n"
+        f"Views: {info['views']:,}\n\n"
+        f"Choose format:"
     )
     
     # Delete processing message
@@ -424,8 +521,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_photo(
                 photo=info['thumbnail'],
                 caption=caption,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='Markdown'
+                reply_markup=quality_keyboard(token),
             )
             return
         except:
@@ -433,8 +529,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         caption,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
+        reply_markup=quality_keyboard(token),
     )
 
 def store_url_token(context: ContextTypes.DEFAULT_TYPE, url: str, info: Optional[Dict] = None) -> str:
@@ -482,33 +577,48 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    if query.data == "join_check":
+        if await ensure_joined(update, context, from_callback=True):
+            await safe_edit_message(query, "Access granted. Send a TikTok link.")
+        return
+
+    if not await ensure_joined(update, context, from_callback=True):
+        return
+
+    if query.data == "ui:help":
+        await safe_edit_message(query, feature_help_text())
+        return
+    if query.data == "ui:hint_audio":
+        await safe_edit_message(query, "Send a TikTok link, then choose Audio (MP3).")
+        return
+    if query.data == "ui:hint_video":
+        await safe_edit_message(query, "Send a TikTok link, then choose Video (MP4).")
+        return
+
     if query.data == "cancel":
-        await safe_edit_message(query, "✅ Download cancelled.")
+        await safe_edit_message(query, "Download cancelled.")
         return
     
     # Parse callback
     parts = query.data.split(':', 2)
     if len(parts) != 3 or parts[0] != "dl":
-        await safe_edit_message(query, "❌ Invalid selection")
+        await safe_edit_message(query, "Invalid selection.")
         return
     
     _, quality, token = parts
     url, info = get_url_from_token(context, token)
     if not url:
-        await safe_edit_message(query, "❌ Link expired. Please send the URL again.")
+        await safe_edit_message(query, "Link expired. Please send the URL again.")
         return
     
     label = "audio" if quality == "audio" else "video"
-    await safe_edit_message(query, f"⏳ Downloading {label}...\nPlease wait...")
+    await safe_edit_message(query, f"Downloading {label}...\nPlease wait...")
     
     # Download
     filepath = await downloader.download_video(url, quality, update.effective_user.id)
     
     if not filepath or not filepath.exists():
-        await safe_edit_message(
-            query,
-            "❌ Download failed. The video might be too long or restricted."
-        )
+        await safe_edit_message(query, transient_failure_text())
         return
     
     # Check file size
@@ -516,17 +626,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if size_mb > MAX_UPLOAD_MB:
         await safe_edit_message(
             query,
-            f"❌ File too large to upload ({size_mb:.1f} MB)."
+            f"File too large to upload ({size_mb:.1f} MB)."
         )
         if filepath.exists():
             filepath.unlink()
         return
     
-    await safe_edit_message(query, f"📤 Uploading... ({size_mb:.1f} MB)")
+    await safe_edit_message(query, f"Uploading... ({size_mb:.1f} MB)")
     
     try:
         caption_text = build_caption_text(info)
-        base_caption = f"✅ Download complete!\n📁 Size: {size_mb:.1f} MB"
+        base_caption = f"Download complete.\nSize: {size_mb:.1f} MB"
         full_caption = f"{base_caption}\n{caption_text}\n{BOT_USERNAME}" if caption_text else f"{base_caption}\n{BOT_USERNAME}"
         with open(filepath, 'rb') as f:
             if quality == "audio":
@@ -551,7 +661,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Upload error: {e}")
-        await safe_edit_message(query, "❌ Upload failed. The file might be too large.")
+        await safe_edit_message(query, "Upload failed. The file might be too large.")
         
         # Clean up even on error
         if filepath.exists():
@@ -767,6 +877,8 @@ def main():
     print("🤖 Starting TikTok Downloader Bot...")
     print(f"📁 Downloads folder: {DOWNLOAD_DIR.absolute()}")
     print("Press Ctrl+C to stop")
+    print(f"Join gate: {'enabled' if REQUIRED_CHANNEL else 'disabled'}")
+    print(f"Cookies configured: {'yes' if COOKIE_FILE_PATH else 'no'}")
 
     cleanup_downloads()
     
@@ -781,6 +893,7 @@ def main():
     
     # Add handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     app.add_handler(CallbackQueryHandler(button_callback))
