@@ -47,6 +47,9 @@ PORT = int(os.getenv("PORT", "8080"))
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
+# Optional welcome poster shown on /start
+WELCOME_IMAGE_PATH = Path(os.getenv("WELCOME_IMAGE_PATH", "assets/welcome-message.png"))
+
 # Optional: restrict bot usage to specific Telegram user IDs
 ALLOWED_USERS = {
     int(x.strip())
@@ -388,7 +391,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- Video (MP4)\n\n"
         "Use /help for tips."
     )
-    await update.message.reply_text(welcome, reply_markup=build_main_menu())
+    if update.message and WELCOME_IMAGE_PATH.exists():
+        try:
+            with WELCOME_IMAGE_PATH.open("rb") as poster:
+                await update.message.reply_photo(
+                    photo=poster,
+                    caption=welcome,
+                    reply_markup=build_main_menu(),
+                )
+                return
+        except Exception as e:
+            logger.warning(f"Failed to send welcome image: {e}")
+
+    if update.message:
+        await update.message.reply_text(welcome, reply_markup=build_main_menu())
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_joined(update, context):
