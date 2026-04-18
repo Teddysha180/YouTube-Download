@@ -16,6 +16,7 @@ from typing import Optional, Dict, Tuple, Any
 from datetime import timedelta, datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
@@ -306,9 +307,9 @@ async def delete_file_later(path: Path, delay_seconds: int) -> None:
 # ==================== TELEGRAM HANDLERS ====================
 def build_main_menu() -> InlineKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton("Download Audio", callback_data="ui:hint_audio")],
-        [InlineKeyboardButton("Download Video", callback_data="ui:hint_video")],
-        [InlineKeyboardButton("How To Use", callback_data="ui:help")],
+        [InlineKeyboardButton("MP3 Audio", callback_data="ui:hint_audio")],
+        [InlineKeyboardButton("MP4 Video", callback_data="ui:hint_video")],
+        [InlineKeyboardButton("Quick Guide", callback_data="ui:help")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -327,14 +328,14 @@ def pretty_duration(seconds: int) -> str:
 
 def feature_help_text() -> str:
     return (
-        "How this bot works:\n"
-        "1. Send any TikTok link.\n"
-        "2. Pick Audio or Video.\n"
-        "3. Wait for upload.\n\n"
-        "Tips for better success:\n"
-        "- If a download fails, retry after 10 to 30 seconds.\n"
-        "- Private/restricted posts may fail.\n"
-        "- Some links need cookies configured in Render."
+        "Quick guide\n\n"
+        "1. Paste any TikTok link.\n"
+        "2. Choose MP3 Audio or MP4 Video.\n"
+        "3. Wait while the file is prepared and uploaded.\n\n"
+        "Best results\n"
+        "- Retry after 10 to 30 seconds if TikTok blocks the request.\n"
+        "- Private or restricted posts may not download.\n"
+        "- Some links work better when cookies are configured on Render."
     )
 
 def transient_failure_text() -> str:
@@ -384,12 +385,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_joined(update, context):
         return
     welcome = (
-        "TikTok Downloader\n\n"
-        "Send a TikTok link and I will prepare it for download.\n\n"
-        "Available:\n"
-        "- Audio (MP3)\n"
-        "- Video (MP4)\n\n"
-        "Use /help for tips."
+        "<b>TikTok Downloader</b>\n"
+        "Fast, clean TikTok downloads in one place.\n\n"
+        "<b>Available formats</b>\n"
+        "- MP3 Audio\n"
+        "- MP4 Video\n\n"
+        "Paste a TikTok link to get started, or use the menu below."
     )
     if update.message and WELCOME_IMAGE_PATH.exists():
         try:
@@ -397,6 +398,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_photo(
                     photo=poster,
                     caption=welcome,
+                    parse_mode=ParseMode.HTML,
                     reply_markup=build_main_menu(),
                 )
                 return
@@ -404,7 +406,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Failed to send welcome image: {e}")
 
     if update.message:
-        await update.message.reply_text(welcome, reply_markup=build_main_menu())
+        await update.message.reply_text(
+            welcome,
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_main_menu(),
+        )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_joined(update, context):
