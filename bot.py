@@ -393,6 +393,38 @@ def transient_failure_text() -> str:
         "Please try again in 10-30 seconds or send another link."
     )
 
+def welcome_text() -> str:
+    return (
+        "<b>TikTok Downloader</b>\n"
+        "Fast, clean TikTok downloads in one place.\n\n"
+        "<b>Available formats</b>\n"
+        "- MP3 Audio\n"
+        "- MP4 Video\n\n"
+        "Paste a TikTok link to get started, or use the menu below."
+    )
+
+async def send_welcome_message(message) -> None:
+    welcome = welcome_text()
+    if message and WELCOME_IMAGE_PATH.exists():
+        try:
+            with WELCOME_IMAGE_PATH.open("rb") as poster:
+                await message.reply_photo(
+                    photo=poster,
+                    caption=welcome,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=build_main_menu(),
+                )
+                return
+        except Exception as e:
+            logger.warning(f"Failed to send welcome image: {e}")
+
+    if message:
+        await message.reply_text(
+            welcome,
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_main_menu(),
+        )
+
 async def ensure_joined(update: Update, context: ContextTypes.DEFAULT_TYPE, from_callback: bool = False) -> bool:
     if not REQUIRED_CHANNEL:
         return True
@@ -433,33 +465,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     if not await ensure_joined(update, context):
         return
-    welcome = (
-        "<b>TikTok Downloader</b>\n"
-        "Fast, clean TikTok downloads in one place.\n\n"
-        "<b>Available formats</b>\n"
-        "- MP3 Audio\n"
-        "- MP4 Video\n\n"
-        "Paste a TikTok link to get started, or use the menu below."
-    )
-    if update.message and WELCOME_IMAGE_PATH.exists():
-        try:
-            with WELCOME_IMAGE_PATH.open("rb") as poster:
-                await update.message.reply_photo(
-                    photo=poster,
-                    caption=welcome,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=build_main_menu(),
-                )
-                return
-        except Exception as e:
-            logger.warning(f"Failed to send welcome image: {e}")
-
-    if update.message:
-        await update.message.reply_text(
-            welcome,
-            parse_mode=ParseMode.HTML,
-            reply_markup=build_main_menu(),
-        )
+    await send_welcome_message(update.message)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_joined(update, context):
@@ -650,7 +656,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "join_check":
         if await ensure_joined(update, context, from_callback=True):
-            await safe_edit_message(query, "Access granted. Send a TikTok link.")
+            try:
+                await query.message.delete()
+            except Exception as e:
+                logger.warning(f"Failed to delete join gate message: {e}")
+            if query.message:
+                await send_welcome_message(query.message)
         return
 
     if not await ensure_joined(update, context, from_callback=True):
