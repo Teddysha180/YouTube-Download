@@ -17,6 +17,7 @@ from datetime import timedelta, datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
+from telegram.error import TimedOut
 from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
@@ -139,6 +140,13 @@ USE_POLLING = os.getenv("USE_POLLING", "").strip().lower() in {"1", "true", "yes
 # Retry tuning for intermittent TikTok failures
 INFO_RETRIES = int(os.getenv("INFO_RETRIES", "2"))
 DOWNLOAD_RETRIES = int(os.getenv("DOWNLOAD_RETRIES", "2"))
+UPLOAD_RETRIES = int(os.getenv("UPLOAD_RETRIES", "2"))
+
+# Telegram uploads often take longer than metadata requests on Render/free networks.
+TELEGRAM_CONNECT_TIMEOUT = float(os.getenv("TELEGRAM_CONNECT_TIMEOUT", "30"))
+TELEGRAM_READ_TIMEOUT = float(os.getenv("TELEGRAM_READ_TIMEOUT", "120"))
+TELEGRAM_WRITE_TIMEOUT = float(os.getenv("TELEGRAM_WRITE_TIMEOUT", "120"))
+TELEGRAM_POOL_TIMEOUT = float(os.getenv("TELEGRAM_POOL_TIMEOUT", "30"))
 
 
 # ==================== DOWNLOAD HANDLER ====================
@@ -303,6 +311,47 @@ async def delete_file_later(path: Path, delay_seconds: int) -> None:
             path.unlink()
     except Exception as e:
         logger.error(f"Delayed delete error for {path}: {e}")
+
+async def send_media_with_retries(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    filepath: Path,
+    quality: str,
+    caption: str,
+) -> None:
+    for attempt in range(UPLOAD_RETRIES + 1):
+        try:
+            with open(filepath, "rb") as media_file:
+                if quality == "audio":
+                    await context.bot.send_audio(
+                        chat_id=chat_id,
+                        audio=media_file,
+                        title=filepath.stem,
+                        performer="TikTok",
+                        caption=caption,
+                        connect_timeout=TELEGRAM_CONNECT_TIMEOUT,
+                        read_timeout=TELEGRAM_READ_TIMEOUT,
+                        write_timeout=TELEGRAM_WRITE_TIMEOUT,
+                        pool_timeout=TELEGRAM_POOL_TIMEOUT,
+                    )
+                else:
+                    await context.bot.send_video(
+                        chat_id=chat_id,
+                        video=media_file,
+                        caption=caption,
+                        supports_streaming=True,
+                        connect_timeout=TELEGRAM_CONNECT_TIMEOUT,
+                        read_timeout=TELEGRAM_READ_TIMEOUT,
+                        write_timeout=TELEGRAM_WRITE_TIMEOUT,
+                        pool_timeout=TELEGRAM_POOL_TIMEOUT,
+                    )
+            return
+        except TimedOut as e:
+            logger.warning(f"Upload timeout on attempt {attempt + 1}: {e}")
+            if attempt >= UPLOAD_RETRIES:
+                raise
+            await asyncio.sleep(2 + attempt)
 
 # ==================== TELEGRAM HANDLERS ====================
 def build_main_menu() -> InlineKeyboardMarkup:
@@ -660,30 +709,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption_text = build_caption_text(info)
         base_caption = f"Download complete.\nSize: {size_mb:.1f} MB"
         full_caption = f"{base_caption}\n{caption_text}\n{BOT_USERNAME}" if caption_text else f"{base_caption}\n{BOT_USERNAME}"
-        with open(filepath, 'rb') as f:
-            if quality == "audio":
-                await context.bot.send_audio(
-                    chat_id=update.effective_chat.id,
-                    audio=f,
-                    title=filepath.stem,
-                    performer="TikTok",
-                    caption=full_caption
-                )
-            else:
-                await context.bot.send_video(
-                    chat_id=update.effective_chat.id,
-                    video=f,
-                    caption=full_caption,
-                    supports_streaming=True
-                )
+        await send_media_with_retries(
+            context=context,
+            chat_id=update.effective_chat.id,
+            filepath=filepath,
+            quality=quality,
+            caption=full_caption,
+        )
         
         # Clean up message and schedule file deletion
         await query.message.delete()
         asyncio.create_task(delete_file_later(filepath, DELETE_AFTER_SEND_SECONDS))
 
+    except TimedOut as e:
+        logger.error(f"Upload timed out after retries: {e}")
+        await safe_edit_message(
+            query,
+            "Upload timed out while sending to Telegram. Please try the same link again."
+        )
+
+        if filepath.exists():
+            filepath.unlink()
     except Exception as e:
         logger.error(f"Upload error: {e}")
-        await safe_edit_message(query, "Upload failed. The file might be too large.")
+        await safe_edit_message(query, "Upload failed during transfer to Telegram. Please try again.")
         
         # Clean up even on error
         if filepath.exists():
@@ -907,10 +956,10 @@ def main():
     
     # Create application with explicit timeouts to tolerate slow networks
     request = HTTPXRequest(
-        connect_timeout=30.0,
-        read_timeout=30.0,
-        write_timeout=30.0,
-        pool_timeout=30.0
+        connect_timeout=TELEGRAM_CONNECT_TIMEOUT,
+        read_timeout=TELEGRAM_READ_TIMEOUT,
+        write_timeout=TELEGRAM_WRITE_TIMEOUT,
+        pool_timeout=TELEGRAM_POOL_TIMEOUT
     )
     app = Application.builder().token(BOT_TOKEN).request(request).build()
     
