@@ -445,7 +445,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("You are not authorized to use this bot.")
         return
 
-    # URL validation (supports tiktok.com and vm.tiktok.com)
+    # URL validation (supports standard TikTok URLs and short links)
     if not is_valid_tiktok_url(url):
         await update.message.reply_text("Please send a valid TikTok URL.")
         return
@@ -866,6 +866,7 @@ TIKTOK_HOSTS = {
     "www.tiktok.com",
     "m.tiktok.com",
     "vm.tiktok.com",
+    "vt.tiktok.com",
 }
 
 def is_valid_tiktok_url(url: str) -> bool:
@@ -882,8 +883,8 @@ def is_valid_tiktok_url(url: str) -> bool:
         return False
 
     path = parsed.path or ""
-    # TikTok links typically include /@user/video/<id> or short vm.tiktok.com/<id>
-    if host == "vm.tiktok.com":
+    # TikTok short links typically use vm.tiktok.com or vt.tiktok.com
+    if host in {"vm.tiktok.com", "vt.tiktok.com"}:
         return bool(path.strip("/"))
     return "/video/" in path or path.strip("/") != ""
 
