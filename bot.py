@@ -123,7 +123,10 @@ SHOW_ERRORS = os.getenv("SHOW_ERRORS", "").strip().lower() in {"1", "true", "yes
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
 
 # Telegram upload limit (MB). Default set conservatively.
-MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "49"))
+MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "50"))
+
+# Connection pool size for concurrent requests
+CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", "100"))
 
 # Auto-cleaner: delete files older than this many hours
 CLEANUP_MAX_AGE_HOURS = float(os.getenv("CLEANUP_MAX_AGE_HOURS", "6"))
@@ -144,9 +147,9 @@ UPLOAD_RETRIES = int(os.getenv("UPLOAD_RETRIES", "2"))
 
 # Telegram uploads often take longer than metadata requests on Render/free networks.
 TELEGRAM_CONNECT_TIMEOUT = float(os.getenv("TELEGRAM_CONNECT_TIMEOUT", "30"))
-TELEGRAM_READ_TIMEOUT = float(os.getenv("TELEGRAM_READ_TIMEOUT", "120"))
-TELEGRAM_WRITE_TIMEOUT = float(os.getenv("TELEGRAM_WRITE_TIMEOUT", "120"))
-TELEGRAM_POOL_TIMEOUT = float(os.getenv("TELEGRAM_POOL_TIMEOUT", "30"))
+TELEGRAM_READ_TIMEOUT = float(os.getenv("TELEGRAM_READ_TIMEOUT", "180"))
+TELEGRAM_WRITE_TIMEOUT = float(os.getenv("TELEGRAM_WRITE_TIMEOUT", "180"))
+TELEGRAM_POOL_TIMEOUT = float(os.getenv("TELEGRAM_POOL_TIMEOUT", "60"))
 
 
 # ==================== DOWNLOAD HANDLER ====================
@@ -154,7 +157,7 @@ class VideoDownloader:
     """Handles TikTok downloads"""
     
     def __init__(self):
-        self.semaphore = asyncio.Semaphore(1)  # One download at a time for testing
+        self.semaphore = asyncio.Semaphore(4)  # Safer limit for Render Free tier
     
     async def get_video_info(self, url: str) -> Optional[Dict]:
         """Extract video information"""
@@ -970,9 +973,10 @@ def main():
         connect_timeout=TELEGRAM_CONNECT_TIMEOUT,
         read_timeout=TELEGRAM_READ_TIMEOUT,
         write_timeout=TELEGRAM_WRITE_TIMEOUT,
-        pool_timeout=TELEGRAM_POOL_TIMEOUT
+        pool_timeout=TELEGRAM_POOL_TIMEOUT,
+        connection_pool_size=CONNECTION_POOL_SIZE
     )
-    app = Application.builder().token(BOT_TOKEN).request(request).build()
+    app = Application.builder().token(BOT_TOKEN).request(request).concurrent_updates(True).build()
     
     # Add handlers
     app.add_handler(CommandHandler("start", start))
